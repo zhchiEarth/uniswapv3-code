@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity >=0.5.0;
 
-import './BitMath.sol';
+import "./BitMath.sol";
 
 /// @title Packed tick initialized state library
 /// @notice Stores a packed mapping of tick index to its initialized state
@@ -12,23 +12,23 @@ library TickBitmap {
     /// @return wordPos The key in the mapping containing the word in which the bit is stored
     /// @return bitPos The bit position in the word where the flag is stored
     function position(int24 tick) private pure returns (int16 wordPos, uint8 bitPos) {
-        wordPos = int16(tick >> 8);
-        bitPos = uint8(uint24(tick % 256));
+        wordPos = int16(tick >> 8); // 2的8次方🟰256, 256>>8 = 1, 定位在第几个 bitmap中
+        bitPos = uint8(uint24(tick % 256)); // 定位在这个 bitmap的位置
     }
 
     /// @notice Flips the initialized state for a given tick from false to true, or vice versa
     /// @param self The mapping in which to flip the tick
     /// @param tick The tick to flip
     /// @param tickSpacing The spacing between usable ticks
-    function flipTick(
-        mapping(int16 => uint256) storage self,
-        int24 tick,
-        int24 tickSpacing
-    ) internal {
+    function flipTick(mapping(int16 => uint256) storage self, int24 tick, int24 tickSpacing) internal {
+        // 判断不是同一个间隔 tick
         require(tick % tickSpacing == 0); // ensure that the tick is spaced
         (int16 wordPos, uint8 bitPos) = position(tick / tickSpacing);
-        uint256 mask = 1 << bitPos;
-        self[wordPos] ^= mask;
+        uint256 mask = 1 << bitPos; // 计算bitPos平方, 1<<2 = 4,  1<<3 = 8
+        self[wordPos] ^= mask; // 标记
+            // mask = 2**bit_pos # or 1 << bit_pos
+            // print(bin(mask))
+            // #0b10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
     }
 
     /// @notice Returns the next initialized tick contained in the same word (or adjacent word) as the tick that is either
@@ -48,9 +48,11 @@ library TickBitmap {
         int24 compressed = tick / tickSpacing;
         if (tick < 0 && tick % tickSpacing != 0) compressed--; // round towards negative infinity
 
+        // 我们是卖出 token x，在右边寻找下一个 tick；false 时相反。
         if (lte) {
             (int16 wordPos, uint8 bitPos) = position(compressed);
             // all the 1s at or to the right of the current bitPos
+            // 当前 bitPos 右侧或右侧的所有 1
             uint256 mask = (1 << bitPos) - 1 + (1 << bitPos);
             uint256 masked = self[wordPos] & mask;
 

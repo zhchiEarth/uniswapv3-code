@@ -85,38 +85,28 @@ contract UniswapV3Pool {
 
     mapping(int24 => Tick.Info) public ticks;
     mapping(int16 => uint256) public tickBitmap;
-    mapping(bytes32 => Position.Info) public positions;
+    mapping(bytes32 => Position.Info) public positions; // 标记用户添加的流动性
 
-    constructor(
-        address token0_,
-        address token1_,
-        uint160 sqrtPriceX96,
-        int24 tick
-    ) {
+    constructor(address token0_, address token1_, uint160 sqrtPriceX96, int24 tick) {
         token0 = token0_;
         token1 = token1_;
 
         slot0 = Slot0({sqrtPriceX96: sqrtPriceX96, tick: tick});
     }
 
-    function mint(
-        address owner,
-        int24 lowerTick,
-        int24 upperTick,
-        uint128 amount,
-        bytes calldata data
-    ) external returns (uint256 amount0, uint256 amount1) {
-        if (
-            lowerTick >= upperTick ||
-            lowerTick < MIN_TICK ||
-            upperTick > MAX_TICK
-        ) revert InvalidTickRange();
+    function mint(address owner, int24 lowerTick, int24 upperTick, uint128 amount, bytes calldata data)
+        external
+        returns (uint256 amount0, uint256 amount1)
+    {
+        if (lowerTick >= upperTick || lowerTick < MIN_TICK || upperTick > MAX_TICK) revert InvalidTickRange();
 
         if (amount == 0) revert ZeroLiquidity();
 
+        // 当流动性被添加到一个空的 tick 或整个 tick 的流动性被耗尽时 flipped 为true。
         bool flippedLower = ticks.update(lowerTick, amount);
         bool flippedUpper = ticks.update(upperTick, amount);
 
+        // 反转标记
         if (flippedLower) {
             tickBitmap.flipTick(lowerTick, 1);
         }
@@ -125,25 +115,19 @@ contract UniswapV3Pool {
             tickBitmap.flipTick(upperTick, 1);
         }
 
-        Position.Info storage position = positions.get(
-            owner,
-            lowerTick,
-            upperTick
-        );
+        Position.Info storage position = positions.get(owner, lowerTick, upperTick);
         position.update(amount);
 
         Slot0 memory slot0_ = slot0;
 
+        // 计算token x当前的价格
         amount0 = Math.calcAmount0Delta(
-            TickMath.getSqrtRatioAtTick(slot0_.tick),
-            TickMath.getSqrtRatioAtTick(upperTick),
-            amount
+            TickMath.getSqrtRatioAtTick(slot0_.tick), TickMath.getSqrtRatioAtTick(upperTick), amount
         );
 
+        // 计算token y当前的价格
         amount1 = Math.calcAmount1Delta(
-            TickMath.getSqrtRatioAtTick(slot0_.tick),
-            TickMath.getSqrtRatioAtTick(lowerTick),
-            amount
+            TickMath.getSqrtRatioAtTick(slot0_.tick), TickMath.getSqrtRatioAtTick(lowerTick), amount
         );
 
         liquidity += uint128(amount);
@@ -152,33 +136,22 @@ contract UniswapV3Pool {
         uint256 balance1Before;
         if (amount0 > 0) balance0Before = balance0();
         if (amount1 > 0) balance1Before = balance1();
-        IUniswapV3MintCallback(msg.sender).uniswapV3MintCallback(
-            amount0,
-            amount1,
-            data
-        );
-        if (amount0 > 0 && balance0Before + amount0 > balance0())
+        IUniswapV3MintCallback(msg.sender).uniswapV3MintCallback(amount0, amount1, data);
+        if (amount0 > 0 && balance0Before + amount0 > balance0()) {
             revert InsufficientInputAmount();
-        if (amount1 > 0 && balance1Before + amount1 > balance1())
+        }
+        if (amount1 > 0 && balance1Before + amount1 > balance1()) {
             revert InsufficientInputAmount();
+        }
 
-        emit Mint(
-            msg.sender,
-            owner,
-            lowerTick,
-            upperTick,
-            amount,
-            amount0,
-            amount1
-        );
+        emit Mint(msg.sender, owner, lowerTick, upperTick, amount, amount0, amount1);
     }
 
-    function swap(
-        address recipient,
-        bool zeroForOne,
-        uint256 amountSpecified,
-        bytes calldata data
-    ) public returns (int256 amount0, int256 amount1) {
+    // 方向是相反的：当购买 token x 时，我们实际上在搜寻左边的流动性 tick；当卖出 token x 时，我们搜寻右边的 tick
+    function swap(address recipient, bool zeroForOne, uint256 amountSpecified, bytes calldata data)
+        public
+        returns (int256 amount0, int256 amount1)
+    {
         Slot0 memory slot0_ = slot0;
 
         SwapState memory state = SwapState({
@@ -188,26 +161,19 @@ contract UniswapV3Pool {
             tick: slot0_.tick
         });
 
+        // 遍历整个tick
         while (state.amountSpecifiedRemaining > 0) {
             StepState memory step;
 
             step.sqrtPriceStartX96 = state.sqrtPriceX96;
 
-            (step.nextTick, ) = tickBitmap.nextInitializedTickWithinOneWord(
-                state.tick,
-                1,
-                zeroForOne
-            );
+            (step.nextTick,) = tickBitmap.nextInitializedTickWithinOneWord(state.tick, 1, zeroForOne);
 
             step.sqrtPriceNextX96 = TickMath.getSqrtRatioAtTick(step.nextTick);
 
-            (state.sqrtPriceX96, step.amountIn, step.amountOut) = SwapMath
-                .computeSwapStep(
-                    step.sqrtPriceStartX96,
-                    step.sqrtPriceNextX96,
-                    liquidity,
-                    state.amountSpecifiedRemaining
-                );
+            (state.sqrtPriceX96, step.amountIn, step.amountOut) = SwapMath.computeSwapStep(
+                step.sqrtPriceStartX96, step.sqrtPriceNextX96, liquidity, state.amountSpecifiedRemaining
+            );
 
             state.amountSpecifiedRemaining -= step.amountIn;
             state.amountCalculated += step.amountOut;
@@ -219,48 +185,28 @@ contract UniswapV3Pool {
         }
 
         (amount0, amount1) = zeroForOne
-            ? (
-                int256(amountSpecified - state.amountSpecifiedRemaining),
-                -int256(state.amountCalculated)
-            )
-            : (
-                -int256(state.amountCalculated),
-                int256(amountSpecified - state.amountSpecifiedRemaining)
-            );
+            ? (int256(amountSpecified - state.amountSpecifiedRemaining), -int256(state.amountCalculated))
+            : (-int256(state.amountCalculated), int256(amountSpecified - state.amountSpecifiedRemaining));
 
         if (zeroForOne) {
             IERC20(token1).transfer(recipient, uint256(-amount1));
 
             uint256 balance0Before = balance0();
-            IUniswapV3SwapCallback(msg.sender).uniswapV3SwapCallback(
-                amount0,
-                amount1,
-                data
-            );
-            if (balance0Before + uint256(amount0) > balance0())
+            IUniswapV3SwapCallback(msg.sender).uniswapV3SwapCallback(amount0, amount1, data);
+            if (balance0Before + uint256(amount0) > balance0()) {
                 revert InsufficientInputAmount();
+            }
         } else {
             IERC20(token0).transfer(recipient, uint256(-amount0));
 
             uint256 balance1Before = balance1();
-            IUniswapV3SwapCallback(msg.sender).uniswapV3SwapCallback(
-                amount0,
-                amount1,
-                data
-            );
-            if (balance1Before + uint256(amount1) > balance1())
+            IUniswapV3SwapCallback(msg.sender).uniswapV3SwapCallback(amount0, amount1, data);
+            if (balance1Before + uint256(amount1) > balance1()) {
                 revert InsufficientInputAmount();
+            }
         }
 
-        emit Swap(
-            msg.sender,
-            recipient,
-            amount0,
-            amount1,
-            slot0.sqrtPriceX96,
-            liquidity,
-            slot0.tick
-        );
+        emit Swap(msg.sender, recipient, amount0, amount1, slot0.sqrtPriceX96, liquidity, slot0.tick);
     }
 
     ////////////////////////////////////////////////////////////////////////////
